@@ -12,9 +12,18 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware  # Import middleware
 from tenacity import retry, stop_after_attempt, wait_exponential
 from motor.motor_asyncio import AsyncIOMotorClient
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-
-        
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
+async def request_infura(url):
+    async with rate_limiter, semaphore:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 429:
+                    print("Rate limit exceeded, retrying...")
+                    raise Exception("Rate limit exceeded")
+                response.raise_for_status()
+                return await response.json()
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(), logging.FileHandler("bot.log")])
@@ -64,7 +73,7 @@ class RateLimiter:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
 
-class CustomSemaphore:
+class CustomSemaphore:  
     def __init__(self, value):
         self._semaphore = asyncio.Semaphore(value)
 
@@ -137,13 +146,14 @@ class BlockchainMonitor:
         except Exception as e:
             logger.exception(f"Error in periodic_purge: {e}")
 
-    async def monitor_blocks(self):  # Change this line to make monitor_blocks async
+    async def monitor_blocks(self):
         logger.info("Monitor blocks started")
         try:
             while True:
-                latest_block_number = self.w3.eth.block_number  # Changed w3 to self.w3
-                await self.process_block(latest_block_number)  # Added await here
-                await asyncio.sleep(10)  # Adjusted sleep duration to 10 seconds
+                latest_block_number = self.w3.eth.block_number
+                await asyncio.sleep(1)  # sleep for 1 second before processing the block
+                await self.process_block(latest_block_number)
+                await asyncio.sleep(10)
         except Exception as e:
             logger.exception(f"Error in monitor_blocks: {e}")
 
@@ -187,6 +197,47 @@ class BlockchainMonitor:
                 await asyncio.sleep(2.75)  # Adding a delay before retrying
                 return await self.process_block(block_number)  # Recursive retry
 
+            # Add method signatures for ERC721 and ERC1155
+            erc721_transfer_event_signature = "Transfer(address,address,uint256)"
+            erc1155_transfer_single_event_signature = "TransferSingle(address,address,address,uint256,uint256)"
+
+            # Create event filters for ERC721 and ERC1155
+            erc721_transfer_event_filter = self.w3.eth.filter({
+                "fromBlock": block_number,
+                "toBlock": block_number,
+                "topics": [self.w3.keccak(text=erc721_transfer_event_signature).hex()]
+            })
+
+            erc1155_transfer_single_event_filter = self.w3.eth.filter({
+                "fromBlock": block_number,
+                "toBlock": block_number,
+                "topics": [self.w3.keccak(text=erc1155_transfer_single_event_signature).hex()]
+            })
+
+            # Get new entries for ERC721 and ERC1155
+            erc721_transfer_events = await asyncio.to_thread(erc721_transfer_event_filter.get_new_entries)
+            erc1155_transfer_single_events = await asyncio.to_thread(erc1155_transfer_single_event_filter.get_new_entries)
+
+            # Process ERC721 Transfer events
+            for event in erc721_transfer_events:
+                contract_address = event['address']
+                contract_address = Web3.to_checksum_address(contract_address)  # Normalize the address
+                wallet_address = event['topics'][2].hex()  # ERC721 Transfer event's second topic is the to address
+                wallet_address = Web3.to_checksum_address(wallet_address[-40:])  # Extract last 40 characters and normalize
+                token_id = int(event['topics'][3].hex(), 16)  # ERC721 Transfer event's third topic is the token id
+                timestamp = self.w3.eth.get_block(event['blockNumber'])['timestamp']
+                await self.process_event(contract_address, wallet_address, timestamp, token_id)
+
+            # Process ERC1155 TransferSingle events
+            for event in erc1155_transfer_single_events:
+                contract_address = event['address']
+                contract_address = Web3.to_checksum_address(contract_address)  # Normalize the address
+                wallet_address = event['topics'][3].hex()  # ERC1155 TransferSingle event's third topic is the to address
+                wallet_address = Web3.to_checksum_address(wallet_address[-40:])  # Extract last 40 characters and normalize
+                token_id = int(event['topics'][4].hex(), 16)  # ERC1155 TransferSingle event's fourth topic is the token id
+                timestamp = self.w3.eth.get_block(event['blockNumber'])['timestamp']
+                await self.process_event(contract_address, wallet_address, timestamp, token_id)
+
             # Create filters for the ERC20 Transfer and Approval events
             erc20_transfer_event_signature = "Transfer(address,address,uint256)"
             erc20_approval_event_signature = "Approval(address,address,uint256)"
@@ -213,48 +264,51 @@ class BlockchainMonitor:
             # Combine the events for further processing
             erc20_events = transfer_events + approval_events
 
-            for event in erc20_events:
-                contract_address = event['address']
-                contract_address = Web3.to_checksum_address(contract_address)  # Normalize the address
+            try:
+                # Code that might raise an exception
+                for event in erc20_events:
+                    contract_address = event['address']
+                    contract_address = Web3.to_checksum_address(contract_address)  # Normalize the address
 
-            # Extracting the wallet address from the topics and normalizing it
-                wallet_address = event['topics'][1].hex()
-                wallet_address = Web3.to_checksum_address(wallet_address[-40:])  # Extract last 40 characters and normalize
+                    # Extracting the wallet address from the topics and normalizing it
+                    wallet_address = event['topics'][1].hex()
+                    wallet_address = Web3.to_checksum_address(wallet_address[-40:])  # Extract last 40 characters and normalize
 
-                timestamp = self.w3.eth.get_block(event['blockNumber'])['timestamp']
+                    timestamp = self.w3.eth.get_block(event['blockNumber'])['timestamp']
 
-                # Check if the wallet is fresh
-                transaction_count = self.w3.eth.get_transaction_count(Web3.to_checksum_address(wallet_address), block_identifier=block_number)
-                if transaction_count <= 15:
-                    # This is a fresh wallet
-                    existing_wallet_entry = await self.wallets_collection.find_one({'wallet_address': wallet_address, 'contract_address': contract_address})  # Added await
-                    if existing_wallet_entry is None:
-                        # Check if the contract was created within the last 2 hours
-                        creation_timestamp = await self.get_contract_creation_timestamp(contract_address)  # Added await here
-                        if creation_timestamp is None:
-                            logger.warning(f"Could not determine creation timestamp for contract: {contract_address}")
-                            continue  # Skip this contract if the creation timestamp could not be determined
+                    # Check if the wallet is fresh
+                    transaction_count = self.w3.eth.get_transaction_count(Web3.to_checksum_address(wallet_address), block_identifier=block_number)
+                    if transaction_count <= 15:
+                        # This is a fresh wallet
+                        existing_wallet_entry = await self.wallets_collection.find_one({'wallet_address': wallet_address, 'contract_address': contract_address})  # Added await
+                        if existing_wallet_entry is None:
+                            # Check if the contract was created within the last 2 hours
+                            creation_timestamp = await self.get_contract_creation_timestamp(contract_address)  # Added await here
+                            if creation_timestamp is None:
+                                logger.warning(f"Could not determine creation timestamp for contract: {contract_address}")
+                                continue  # Skip this contract if the creation timestamp could not be determined
 
-                        two_hours_ago = time.time() - 7200  # Corrected from 86400 to 7200 for 2 hours
-                        if creation_timestamp < two_hours_ago:
-                            logger.warning(f"Contract {contract_address} was created more than 2 hours ago. Skipping.")
-                            continue  # Skip this contract if it was created more than 2 hours ago
+                            two_hours_ago = time.time() - 7200  # Corrected from 86400 to 7200 for 2 hours
+                            if creation_timestamp < two_hours_ago:
+                                logger.warning(f"Contract {contract_address} was created more than 2 hours ago. Skipping.")
+                                continue  # Skip this contract if it was created more than 2 hours ago
 
-                        # Save fresh wallet
-                        await self.wallets_collection.insert_one({
-                            'wallet_address': wallet_address,
-                            'contract_address': contract_address,
-                            'timestamps': [timestamp]
-                        })
-                        # Check if the alert condition is met for this contract
-                        fresh_wallet_count = await self.wallets_collection.count_documents({'contract_address': contract_address})
-                        if fresh_wallet_count >= 7:
-                            # Check if this contract address has not been alerted before
-                            if contract_address not in self.alerted_contracts:
-                                await self.alert(contract_address)
-                                self.alerted_contracts.add(contract_address)  # Mark this contract as alerted
+                            # Save fresh wallet
+                            await self.wallets_collection.insert_one({
+                                'wallet_address': wallet_address,
+                                'contract_address': contract_address,
+                                'timestamps': [timestamp]
+                            })
+                            # Check if the alert condition is met for this contract
+                            fresh_wallet_count = await self.wallets_collection.count_documents({'contract_address': contract_address})
+                            if fresh_wallet_count >= 7:
+                                # Check if this contract address has not been alerted before
+                                if contract_address not in self.alerted_contracts:
+                                    await self.alert(contract_address)
+                                    self.alerted_contracts.add(contract_address)  # Mark this contract as alerted
                     await self.purge_old_entries()  # Added await
-
+            except Exception as e:
+                logger.error(f"Error processing block {block_number}: {e}")
         except Exception as e:
             logger.error(f"Error processing block {block_number}: {e}")
 
@@ -338,14 +392,16 @@ class BlockchainMonitor:
             for entry in old_entries:
                 await self.wallets_collection.delete_one({'_id': entry['_id']})  # use self.wallets_collection
 
-    async def alert(self, contract_address):
-        logger.info(f"Sending alert for contract {contract_address}")
-        try:
-            name = await get_token_name(contract_address)
-            message_text = f"Detected 10+ fresh wallets aping {name}. [Etherscan](https://etherscan.io/token/{contract_address}) | [Dexscreener](https://dexscreener.com/ethereum/{contract_address})"
-            await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID_BOT2, text=message_text, parse_mode='Markdown')  # if send_message is async
-        except Exception as e:
-            logger.error(f"Error sending Telegram alert: {e}")
+async def alert(self, contract_address, token_id=None):
+    logger.info(f"Sending alert for contract {contract_address}")
+    try:
+        name = await get_token_name(contract_address)
+        etherscan_link = f"[Etherscan](https://etherscan.io/token/{contract_address})"
+        opensea_link = f"[OpenSea](https://opensea.io/assets/{contract_address}/{token_id})" if token_id else ""
+        message_text = f"Detected 10+ fresh wallets aping {name}. {etherscan_link} | {opensea_link}"
+        await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID_BOT2, text=message_text, parse_mode='Markdown')  # if send_message is async
+    except Exception as e:
+        logger.error(f"Error sending Telegram alert: {e}")
 
 # Utility function to get method identifier
 def get_method_identifier(method_signature):

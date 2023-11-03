@@ -1,0 +1,7 @@
+aiohttp
+pymongo
+python-telegram-bot
+web3
+tenacity
+motor
+python-dotenv
