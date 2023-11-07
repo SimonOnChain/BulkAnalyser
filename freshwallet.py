@@ -180,7 +180,7 @@ class BlockchainMonitor:
 
     async def process_block(self, block_number):
         block_number = int(block_number)
-        logger.info(f"Processing block {block_number}")
+                logger.info(f"Processing block {block_number}")
         try:
             if not await self.block_is_available(block_number):
                 logger.warning(f"Block {block_number} not available yet. Retrying...")
@@ -204,7 +204,6 @@ class BlockchainMonitor:
             })
             logger.debug(f"Approval event filter: {approval_event_filter}")  # Added logging
 
-            
             loop = asyncio.get_running_loop()
             transfer_events = await loop.run_in_executor(None, transfer_event_filter.get_new_entries)
             logger.debug(f"Transfer events: {transfer_events}")  # Added logging
@@ -218,7 +217,6 @@ class BlockchainMonitor:
             for event in erc20_events:
                 contract_address = event['address']
                 contract_address = Web3.to_checksum_address(contract_address)  # Normalize the address
-
             # Extracting the wallet address from the topics and normalizing it
                 wallet_address = event['topics'][1].hex()
                 wallet_address = Web3.to_checksum_address(wallet_address[-40:])  # Extract last 40 characters and normalize
