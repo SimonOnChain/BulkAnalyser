@@ -1,7 +1,9 @@
 aiohttp
 pymongo
-python-telegram-bot
+python-telegram-bot==13.1
 web3
 tenacity
 motor
-python-dotenv
+requests==2.25.1
+python-dotenv==0.19.1
+eth-utils==1.10.0
