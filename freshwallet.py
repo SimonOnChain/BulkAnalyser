@@ -204,10 +204,12 @@ class BlockchainMonitor:
             })
             logger.debug(f"Approval event filter: {approval_event_filter}")  # Added logging
 
-            transfer_events = await asyncio.to_thread(transfer_event_filter.get_new_entries)
+            
+            loop = asyncio.get_running_loop()
+            transfer_events = await loop.run_in_executor(None, transfer_event_filter.get_new_entries)
             logger.debug(f"Transfer events: {transfer_events}")  # Added logging
 
-            approval_events = await asyncio.to_thread(approval_event_filter.get_new_entries)
+            approval_events = await loop.run_in_executor(None, approval_event_filter.get_new_entries)
             logger.debug(f"Approval events: {approval_events}")  # Added logging
 
             # Combine the events for further processing
