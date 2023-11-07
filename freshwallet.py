@@ -180,7 +180,7 @@ class BlockchainMonitor:
 
     async def process_block(self, block_number):
         block_number = int(block_number)
-                logger.info(f"Processing block {block_number}")
+        logger.info(f"Processing block {block_number}")
         try:
             if not await self.block_is_available(block_number):
                 logger.warning(f"Block {block_number} not available yet. Retrying...")
